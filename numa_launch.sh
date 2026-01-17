@@ -5,6 +5,8 @@
 
 set -euo pipefail
 
+# export CUDA_VISIBLE_DEVICES="0,1,2,3"
+
 # -----------------------
 # Configuration
 # -----------------------
@@ -16,6 +18,7 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 # 1: Global Node Mode -> rank0 takes spare cores from ALL NUMA nodes (whole host)
 USE_FULL_NODE_FOR_RANK0=${USE_FULL_NODE_FOR_RANK0:-0}
 
+# -----------------------
 export CONTROLLER_CORES
 export USE_FULL_NODE_FOR_RANK0
 export LOCAL_RANK=${LOCAL_RANK:-0}

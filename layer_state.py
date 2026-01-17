@@ -6,7 +6,7 @@ enabling sliding window parameter management similar to SlideFormer.
 Key feature: Single-optimizer mode
 - Only rank 0 maintains the CPU Adam optimizer and optimizer states
 - Gradients are reduced to rank 0, which performs the update
-- Updated parameters are broadcast from rank 0 to all other ranks
+- With shared memory, other ranks see updates after a barrier (no broadcast)
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class LayerBufferPool:
         self.pool_size = pool_size
         
         # Pre-allocate buffer units
-        self.pool: deque = deque()
+        self.pool: deque = deque(maxlen=pool_size)
         for _ in range(pool_size):
             unit = {
                 "param": torch.empty(max_param_size, dtype=dtype, device=device),
@@ -64,7 +64,7 @@ class LayerBufferPool:
             }
             self.pool.append(unit)
         
-        self._lock = threading.Lock()
+        # self._lock = threading.Lock()
     
     def acquire(self) -> Dict[str, torch.Tensor]:
         """Acquire a buffer unit from the pool.
@@ -75,19 +75,20 @@ class LayerBufferPool:
         Raises:
             RuntimeError: If pool is exhausted.
         """
-        with self._lock:
-            if not self.pool:
-                # Fallback: allocate new buffer if pool exhausted
-                # This shouldn't happen with proper sliding window control
-                return {
-                    "param": torch.empty(
-                        self.max_param_size, dtype=self.dtype, device=self.device
-                    ),
-                    "grad": torch.empty(
-                        self.max_param_size, dtype=self.dtype, device=self.device
-                    ),
-                }
-            return self.pool.popleft()
+        # with self._lock:
+            # if not self.pool:
+            #     # Fallback: allocate new buffer if pool exhausted
+            #     # This shouldn't happen with proper sliding window control
+            #     print("Warning: Buffer pool exhausted, allocating new buffer")
+            #     return {
+            #         "param": torch.empty(
+            #             self.max_param_size, dtype=self.dtype, device=self.device
+            #         ),
+            #         "grad": torch.empty(
+            #             self.max_param_size, dtype=self.dtype, device=self.device
+            #         ),
+            #     }
+        return self.pool.popleft()
     
     def release(self, unit: Dict[str, torch.Tensor]) -> None:
         """Release a buffer unit back to the pool.
@@ -95,10 +96,10 @@ class LayerBufferPool:
         Args:
             unit: Buffer unit to release.
         """
-        with self._lock:
-            if len(self.pool) < self.pool_size:
-                self.pool.append(unit)
-            # If pool is full, let the unit be garbage collected
+        # with self._lock:
+        #     if len(self.pool) < self.pool_size:
+        self.pool.append(unit)
+        # If pool is full, let the unit be garbage collected
 
 
 class LayerRuntimeState(nn.Module):
@@ -206,6 +207,12 @@ class LayerRuntimeState(nn.Module):
                 pin_memory=True,
             )
             self._use_shared_params = False
+
+        # Multi-GPU now requires shared params (broadcast path removed)
+        if self.is_distributed and not self._use_shared_params:
+            raise RuntimeError(
+                "Multi-GPU requires shared parameters; SharedParamManager was not provided."
+            )
         
         # Parameter and gradient views
         self._param_maps: OrderedDict[str, Tuple[int, torch.Size, int]] = OrderedDict()
@@ -421,19 +428,10 @@ class LayerRuntimeState(nn.Module):
                 )
             
             # Synchronize to ensure rank 0's update is visible to all ranks
-            # When using shared memory, this is just a barrier (no data transfer)
-            # When not using shared memory, this broadcasts the parameters
-            if self.is_distributed:
-                if self._use_shared_params:
-                    # Shared memory: just barrier for synchronization (use Gloo group)
-                    cpu_group = self.dist_sync.cpu_group if self.dist_sync else None
-                    dist.barrier(group=cpu_group)
-                elif self.dist_sync is not None:
-                    # No shared memory: need to broadcast parameters
-                    self.dist_sync.broadcast_params_from_master(
-                        self._cpu_params_flat,
-                        self.total_size,
-                    )
+            # Shared memory + barrier; multi-GPU always uses shared params
+            if self.is_distributed and self._use_shared_params:
+                cpu_group = self.dist_sync.cpu_group if self.dist_sync else None
+                dist.barrier(group=cpu_group)
             
             self.update_finished.set()
             return True

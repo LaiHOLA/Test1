@@ -177,6 +177,7 @@ class SlideFSDP(nn.Module):
             device=torch.device("cpu"),
             pin_memory=True,
         )
+        
         self._bf16_convert_buffer = torch.empty(
             self.max_param_size,
             dtype=self.dtype,

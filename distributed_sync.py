@@ -3,7 +3,7 @@
 Provides configurable strategies for:
 1. Parameter transfer (CPU->GPU): full H2D vs shard H2D + AllGather
 2. Gradient synchronization: GPU ReduceScatter + D2H vs D2H + CPU AllReduce
-3. Single-optimizer mode: Reduce grads to rank 0, update, broadcast params
+3. Single-optimizer mode: Reduce grads to rank 0, update (shared memory)
 """
 
 from __future__ import annotations
@@ -299,30 +299,6 @@ class DistributedSync:
                 # Average the gradients
                 cpu_buffer[:total_size].div_(self.world_size)
     
-    def broadcast_params_from_master(
-        self,
-        cpu_params: torch.Tensor,
-        total_size: int,
-    ) -> None:
-        """Broadcast updated parameters from rank 0 to all other ranks.
-        
-        This is called after rank 0 completes the optimizer update.
-        Uses CPU (Gloo) communication to broadcast parameters.
-        
-        Args:
-            cpu_params: CPU parameter tensor (FP32, pinned memory).
-            total_size: Number of elements to broadcast.
-        """
-        if not self.is_distributed:
-            return
-        
-        # Broadcast parameters from rank 0 to all ranks using Gloo
-        dist.broadcast(
-            cpu_params[:total_size],
-            src=0,
-            group=self.cpu_group,
-        )
-    
     def barrier(self) -> None:
         """Synchronize all processes using Gloo backend."""
         if self.is_distributed:
@@ -376,14 +352,6 @@ class NoOpSync:
         total_size = gpu_grads.numel()
         cpu_buffer[:total_size].copy_(gpu_grads[:total_size], non_blocking=True)
         torch.cuda.current_stream().synchronize()
-    
-    def broadcast_params_from_master(
-        self,
-        cpu_params: torch.Tensor,
-        total_size: int,
-    ) -> None:
-        """No-op (single GPU, no broadcast needed)."""
-        pass
     
     def barrier(self) -> None:
         """No-op barrier."""
